@@ -9,13 +9,13 @@ Flow:
 
 States:
   VERIFIED               live directory hash == on-chain hash
-  AUTHORIZED UPDATE      hashes differ, but the developer approved on-chain first
-                         -> agent anchors the new hash (approval is consumed)
+  AUTHORIZED UPDATE      developer approved on-chain, agent anchored new hash
   UNAUTHORIZED MOD       hashes differ, no approval -> tamper alert written on-chain
 
 Run:  streamlit run app.py
 """
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -33,6 +33,8 @@ from ledger import DEPLOYMENT_FILE, ChainOffline, Ledger, NotDeployed
 POLL_SECONDS = 1.0        # how often the agent re-checks the directory
 BLUE_HOLD_SECONDS = 6     # keep the "Authorized update" banner visible after an anchor
 MISSING = "dir-missing"   # pseudo-hash when the target directory is gone
+
+DEVELOPER_PASSWORD = os.environ.get("DEVELOPER_PASSWORD", "Axion")
 
 ROOT = Path(__file__).parent
 TARGET_DIR = ROOT / "target_system"
@@ -52,7 +54,18 @@ def engine_lock():
 
 @st.cache_resource
 def shared_state():
-    return {"last_update_diff": []}
+    """Cross-rerun mutable state shared by all sessions.
+
+    Keys:
+      last_update_diff  – file changes captured at the moment of an authorized anchor
+      last_reported_hash – the most recent live hash for which a TamperDetected event
+                           was emitted.  Reset to "" whenever the live hash returns to
+                           the trusted hash, so a re-occurrence IS re-reported.
+    """
+    return {
+        "last_update_diff": [],
+        "last_reported_hash": "",
+    }
 
 
 @st.cache_resource(show_spinner=False)
@@ -130,42 +143,41 @@ class Status:
 
 def run_agent(ledger):
     """One monitoring cycle: hash, compare, act on-chain, classify."""
-    with engine_lock():
-        live, trusted = live_hash(), ledger.trusted_hash()
+    ss = shared_state()
 
-        if live != trusted:
+    with engine_lock():
+        lh = live_hash()
+        trusted = ledger.trusted_hash()
+
+        if lh == trusted:
+            # System is clean — reset the dedup tracker so future changes are reportable.
+            ss["last_reported_hash"] = ""
+        elif lh != trusted:
             if ledger.update_authorized():
                 # 🔵 Approved change: anchor the new fingerprint, consuming the approval.
-                shared_state()["last_update_diff"] = diff_vs_trusted()
-                ledger.update_hash(live)
+                ss["last_update_diff"] = diff_vs_trusted()
+                ledger.update_hash(lh)
                 save_manifest()
-                trusted = live
+                trusted = lh
+                ss["last_reported_hash"] = ""
             else:
                 # 🔴 Unapproved change: write the alert on-chain once per distinct bad hash.
-                if not _already_reported(ledger.audit_trail(), live):
-                    ledger.report_tamper(live)
+                # Only suppress if we already reported THIS EXACT hash in this tampered session.
+                if ss["last_reported_hash"] != lh:
+                    ledger.report_tamper(lh)
+                    ss["last_reported_hash"] = lh
 
         trail = ledger.audit_trail()
 
-    if live != trusted:
-        alert = next((e for e in reversed(trail) if e.kind == "tamper" and e.hash == live), None)
-        return Status("tamper", live, trusted, trail, event=alert, changes=diff_vs_trusted())
+    if lh != trusted:
+        alert = next((e for e in reversed(trail) if e.kind == "tamper" and e.hash == lh), None)
+        return Status("tamper", lh, trusted, trail, event=alert, changes=diff_vs_trusted())
 
     last_anchor = next((e for e in reversed(trail) if e.kind == "anchored"), None)
     if last_anchor and last_anchor.by == ledger.agent and time.time() - last_anchor.timestamp < BLUE_HOLD_SECONDS:
-        return Status("authorized", live, trusted, trail, event=last_anchor,
-                      changes=shared_state()["last_update_diff"])
-    return Status("verified", live, trusted, trail, window_open=ledger.update_authorized())
-
-
-def _already_reported(trail, bad_hash):
-    """Has this exact bad hash been reported since the last legitimate anchor?"""
-    for e in reversed(trail):
-        if e.kind == "anchored":
-            return False
-        if e.kind == "tamper" and e.hash == bad_hash:
-            return True
-    return False
+        return Status("authorized", lh, trusted, trail, event=last_anchor,
+                      changes=ss["last_update_diff"])
+    return Status("verified", lh, trusted, trail, window_open=ledger.update_authorized())
 
 
 # --------------------------------------------------------------------- HTML pieces
@@ -208,6 +220,7 @@ def html_status(s):
                        f"Anchored in block {e.block} at {local_time(e.timestamp)} Local by Agent-01",
                        html_file_changes(s.changes))
 
+    # tamper state
     e = s.event
     meta = (f"Tamper alert written on-chain in block {e.block} at {local_time(e.timestamp)} Local"
             if e else "Writing tamper alert on-chain…")
@@ -257,7 +270,10 @@ def html_file_list():
     """Show the current contents of the monitored directory."""
     if not TARGET_DIR.is_dir():
         return ""
-    files = sorted(f for f in TARGET_DIR.rglob("*") if f.is_file())
+    try:
+        files = sorted(f for f in TARGET_DIR.rglob("*") if f.is_file())
+    except OSError:
+        return ""
     if not files:
         return ""
     rows = "".join(
@@ -380,10 +396,99 @@ def _anchor_directory(uploaded_files):
     # Save the trusted manifest
     save_manifest()
 
+    # Reset the dedup tracker so the fresh session starts clean
+    shared_state()["last_reported_hash"] = ""
+
     # Mark as anchored
     st.session_state["dir_anchored"] = True
     st.toast("✅ Directory anchored on-chain!", icon="🔗")
     st.rerun()
+
+
+# ------------------------------------------------------------------ developer auth UI
+def show_developer_auth(status, ledger):
+    """Show the developer authorization panel when tampering is detected."""
+    st.html('''
+    <div class="auth-panel">
+        <div class="auth-header">
+            <div class="auth-icon">🔐</div>
+            <div class="auth-title">Developer Verification Required</div>
+            <div class="auth-desc">This modification has not been authorized. Enter developer credentials to approve the current change and anchor the new fingerprint on-chain.</div>
+        </div>
+    </div>
+    ''')
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        password = st.text_input(
+            "Developer ID / Password",
+            type="password",
+            key="dev_password",
+            placeholder="Enter developer credential",
+        )
+
+        if st.button("🔓 Authorize This Change", key="btn_authorize", use_container_width=True, type="primary"):
+            if not password:
+                st.session_state["auth_msg"] = ("error", "No credential entered. The modification remains unauthorized.")
+            elif password != DEVELOPER_PASSWORD:
+                st.session_state["auth_msg"] = ("error", "Developer authentication failed. The modification remains unauthorized.")
+            else:
+                # Capture the current live hash at the moment of approval
+                current_live = live_hash()
+                if current_live == MISSING:
+                    st.session_state["auth_msg"] = ("error", "Cannot authorize: target directory is missing.")
+                elif current_live == status.trusted:
+                    st.session_state["auth_msg"] = ("info", "Files have already been restored to the trusted state. No authorization needed.")
+                elif current_live != status.live:
+                    # Race condition: files changed between detection and approval
+                    st.session_state["auth_msg"] = ("error", "The files changed again since the tamper was detected. Please review the new state and re-authorize.")
+                else:
+                    try:
+                        # Capture file changes BEFORE authorization so we can display them in BLUE state
+                        shared_state()["last_update_diff"] = diff_vs_trusted()
+
+                        # Developer authorization on-chain (two-key model)
+                        ledger.authorize_update()
+                        # Agent anchors the new hash (consumes the approval)
+                        ledger.update_hash(current_live)
+                        # Save the new trusted manifest
+                        save_manifest()
+                        # Reset dedup tracker
+                        shared_state()["last_reported_hash"] = ""
+
+                        st.session_state["auth_msg"] = ("success", "Developer authorization verified. New fingerprint anchored on-chain by Agent-01.")
+                        # Clear the password field
+                        if "dev_password" in st.session_state:
+                            del st.session_state["dev_password"]
+                        st.rerun()
+                    except Exception as e:
+                        st.session_state["auth_msg"] = ("error", f"On-chain authorization failed: {e}")
+
+        # Show any auth feedback message
+        msg_info = st.session_state.get("auth_msg")
+        if msg_info:
+            msg_type, msg_text = msg_info
+            if msg_type == "error":
+                st.html(f'''
+                <div class="auth-feedback auth-error">
+                    <span class="auth-fb-icon">✗</span>
+                    <span>{escape(msg_text)}</span>
+                </div>
+                ''')
+            elif msg_type == "success":
+                st.html(f'''
+                <div class="auth-feedback auth-success">
+                    <span class="auth-fb-icon">✓</span>
+                    <span>{escape(msg_text)}</span>
+                </div>
+                ''')
+            elif msg_type == "info":
+                st.html(f'''
+                <div class="auth-feedback auth-info">
+                    <span class="auth-fb-icon">ℹ</span>
+                    <span>{escape(msg_text)}</span>
+                </div>
+                ''')
 
 
 # ------------------------------------------------------------------ sidebar: demo panel
@@ -398,6 +503,9 @@ if dir_is_anchored:
 
     if upload_new:
         st.session_state["dir_anchored"] = False
+        # Clear any auth messages
+        if "auth_msg" in st.session_state:
+            del st.session_state["auth_msg"]
         st.rerun()
 
     with st.sidebar:
@@ -427,6 +535,18 @@ else:
             st.html(html_problem(problem))
             return
         st.html(html_status(status))
+
+        # Show developer authorization panel when tampering is detected
+        if status.state == "tamper":
+            show_developer_auth(status, ledger)
+            # Clear any stale success messages when in tamper state
+            if st.session_state.get("auth_msg", (None,))[0] == "success":
+                del st.session_state["auth_msg"]
+        else:
+            # Clear auth messages when not in tamper state
+            if "auth_msg" in st.session_state:
+                del st.session_state["auth_msg"]
+
         file_list = html_file_list()
         if file_list:
             st.html(file_list)

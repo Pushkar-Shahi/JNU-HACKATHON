@@ -159,6 +159,28 @@ table.trail { width: 100%; border-collapse: collapse; font-size: .98rem; }
 .fc-path { color: var(--text); overflow-wrap: anywhere; }
 .fc-more { color: var(--muted); font-size: .85rem; padding: .2rem .6rem; }
 
+/* ---- developer authorization panel */
+.auth-panel { background: var(--panel); border: 1px solid var(--red-line); border-radius: 14px;
+  padding: 1.4rem 1.5rem; margin-top: .75rem; }
+.auth-header { margin-bottom: .2rem; }
+.auth-icon { font-size: 1.8rem; margin-bottom: .4rem; }
+.auth-title { font-size: 1.25rem; font-weight: 700; color: var(--text); margin-bottom: .3rem; }
+.auth-desc { color: var(--muted); font-size: .98rem; line-height: 1.55; }
+.auth-feedback { display: flex; align-items: flex-start; gap: .6rem; padding: .75rem 1rem;
+  border-radius: 10px; font-size: .95rem; margin-top: .6rem; line-height: 1.5; }
+.auth-fb-icon { font-size: 1.1rem; flex: none; margin-top: .05rem; }
+.auth-error { background: var(--red-bg); border: 1px solid var(--red-line); color: var(--red); }
+.auth-success { background: var(--green-bg); border: 1px solid var(--green-line); color: var(--green); }
+.auth-info { background: var(--blue-bg); border: 1px solid var(--blue-line); color: var(--blue); }
+
+/* ---- authorize button */
+.st-key-btn_authorize button { background: linear-gradient(135deg, #ef4444, #dc2626) !important;
+  border: none !important; color: #fff !important; font-weight: 600 !important; font-size: 1.02rem !important;
+  padding: .8rem 1.5rem !important; border-radius: 12px !important;
+  box-shadow: 0 4px 20px rgba(239,68,68,.30) !important; transition: transform .1s, box-shadow .15s !important; }
+.st-key-btn_authorize button:hover { transform: translateY(-1px) !important; box-shadow: 0 6px 28px rgba(239,68,68,.40) !important; }
+.st-key-btn_authorize button:active { transform: scale(.98) !important; }
+
 @media (max-width: 640px) {
   [data-testid="stMainBlockContainer"] { padding: 1.25rem 1rem 2rem; }
   .topbar { flex-direction: column; gap: .25rem; }

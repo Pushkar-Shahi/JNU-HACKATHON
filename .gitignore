@@ -6,3 +6,4 @@ cache/
 deployment.json
 __pycache__/
 .DS_Store
+target_system/

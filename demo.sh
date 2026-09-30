@@ -5,8 +5,9 @@ cd "$(dirname "$0")"
 
 [ -d node_modules ] || npm install --no-fund --no-audit
 [ -d .venv ] || { python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt; }
-mkdir -p .state
+mkdir -p .state target_system
 export PYTHONWARNINGS="ignore:urllib3 v2 only supports OpenSSL"  # macOS system Python noise
+export DEVELOPER_PASSWORD="${DEVELOPER_PASSWORD:-Axion}"
 
 npx hardhat node > .state/chain.log 2>&1 &
 CHAIN_PID=$!
