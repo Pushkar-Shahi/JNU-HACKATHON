@@ -11,6 +11,7 @@ showSidebarNavigation = false
 
 [server]
 headless = true
+maxUploadSize = 10000
 
 [browser]
 gatherUsageStats = false

@@ -1,31 +1,43 @@
 """Decentralized Runtime Integrity Engine: monitoring agent + live dashboard.
 
-Every second the agent hashes config.json and compares it with the hash anchored
-on-chain, then lands in exactly one of three states:
+Flow:
+  1. User uploads file(s) via the dashboard into target_system/.
+  2. The SHA-256 hash of the ENTIRE target_system/ directory is anchored on-chain.
+  3. The live monitoring dashboard watches the whole directory every second.
+  4. If ANY file inside target_system/ is added, modified, or deleted, the change
+     is detected immediately and a tamper alert is written on-chain.
 
-  VERIFIED               live hash == on-chain hash
+States:
+  VERIFIED               live directory hash == on-chain hash
   AUTHORIZED UPDATE      hashes differ, but the developer approved on-chain first
                          -> agent anchors the new hash (approval is consumed)
   UNAUTHORIZED MOD       hashes differ, no approval -> tamper alert written on-chain
 
 Run:  streamlit run app.py
 """
+import json
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import escape
+from pathlib import Path
 
 import streamlit as st
 
 import styles
 import target
-from hash_utils import sha256_file
+from hash_utils import sha256_directory, directory_manifest, diff_manifests
 from ledger import DEPLOYMENT_FILE, ChainOffline, Ledger, NotDeployed
 
-POLL_SECONDS = 1.0        # how often the agent re-checks the file
+POLL_SECONDS = 1.0        # how often the agent re-checks the directory
 BLUE_HOLD_SECONDS = 6     # keep the "Authorized update" banner visible after an anchor
-MISSING = "file-missing"  # pseudo-hash when an attacker deletes the file outright
+MISSING = "dir-missing"   # pseudo-hash when the target directory is gone
+
+ROOT = Path(__file__).parent
+TARGET_DIR = ROOT / "target_system"
+STATE_DIR = ROOT / ".state"
+MANIFEST_PATH = STATE_DIR / "trusted_manifest.json"
 
 st.set_page_config(page_title="Runtime Integrity Engine", page_icon="🛡️",
                    layout="wide", initial_sidebar_state="auto")
@@ -33,8 +45,6 @@ st.markdown(styles.CSS, unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------ shared resources
-# st.cache_resource objects are shared by every browser tab, so two open dashboards
-# can't both try to anchor the same hash at once.
 @st.cache_resource
 def engine_lock():
     return threading.Lock()
@@ -64,18 +74,46 @@ def get_ledger():
 
 
 def live_hash():
+    """Hash the entire target_system/ directory."""
     try:
-        return sha256_file(target.CONFIG_PATH)
+        h = sha256_directory(TARGET_DIR)
+        return h if h else MISSING
     except OSError:
         return MISSING
 
 
-def utc(ts=None):
-    return datetime.fromtimestamp(ts or time.time(), timezone.utc).strftime("%H:%M:%S")
+def local_time(ts=None):
+    return datetime.fromtimestamp(ts or time.time()).strftime("%H:%M:%S")
 
 
 def short(h):
     return h[:8] if h else "—"
+
+
+# --------------------------------------------------------- snapshot / manifest helpers
+def save_manifest():
+    """Save the current directory manifest as the trusted reference."""
+    STATE_DIR.mkdir(exist_ok=True)
+    manifest = directory_manifest(TARGET_DIR)
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2))
+
+
+def load_manifest():
+    """Load the last trusted manifest."""
+    try:
+        return json.loads(MANIFEST_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def diff_vs_trusted():
+    """Return list of (change_type, filepath) between trusted manifest and live directory."""
+    old = load_manifest()
+    try:
+        new = directory_manifest(TARGET_DIR)
+    except OSError:
+        return [("deleted", f) for f in old]
+    return diff_manifests(old, new)
 
 
 # ----------------------------------------------------------------------- the engine
@@ -98,9 +136,9 @@ def run_agent(ledger):
         if live != trusted:
             if ledger.update_authorized():
                 # 🔵 Approved change: anchor the new fingerprint, consuming the approval.
-                shared_state()["last_update_diff"] = target.diff_vs_snapshot()
+                shared_state()["last_update_diff"] = diff_vs_trusted()
                 ledger.update_hash(live)
-                target.save_snapshot()
+                save_manifest()
                 trusted = live
             else:
                 # 🔴 Unapproved change: write the alert on-chain once per distinct bad hash.
@@ -111,7 +149,7 @@ def run_agent(ledger):
 
     if live != trusted:
         alert = next((e for e in reversed(trail) if e.kind == "tamper" and e.hash == live), None)
-        return Status("tamper", live, trusted, trail, event=alert, changes=target.diff_vs_snapshot())
+        return Status("tamper", live, trusted, trail, event=alert, changes=diff_vs_trusted())
 
     last_anchor = next((e for e in reversed(trail) if e.kind == "anchored"), None)
     if last_anchor and last_anchor.by == ledger.agent and time.time() - last_anchor.timestamp < BLUE_HOLD_SECONDS:
@@ -132,44 +170,53 @@ def _already_reported(trail, bad_hash):
 
 # --------------------------------------------------------------------- HTML pieces
 def html_header(online):
-    live = (f'<div class="live"><span class="dot"></span>Live <span class="mono">{utc()}</span></div>'
+    live_el = (f'<div class="live"><span class="dot"></span>Live <span class="mono">{local_time()}</span></div>'
             if online else '<div class="live off"><span class="dot"></span>Offline</div>')
     return ('<div class="topbar"><div><div class="title">Runtime integrity engine</div>'
             '<div class="subtitle">SHA-256 verification anchored on a blockchain</div></div>'
-            f'{live}</div>')
+            f'{live_el}</div>')
 
 
-def html_changes(changes, limit=4):
+def html_file_changes(changes, limit=6):
+    """Render file-level changes (added/modified/deleted) instead of JSON key diffs."""
+    if not changes:
+        return ""
+    type_icons = {"modified": "✏️", "added": "➕", "deleted": "🗑️"}
+    type_cls = {"modified": "fc-modified", "added": "fc-added", "deleted": "fc-deleted"}
     rows = "".join(
-        f'<div class="change"><span class="k">{escape(k)}</span> '
-        f'<span class="old">{escape(old)}</span> → <span class="new">{escape(new)}</span></div>'
-        for k, old, new in changes[:limit])
-    return f'<div class="changes">{rows}</div>' if rows else ""
+        f'<div class="file-change {type_cls.get(ctype, "")}">'
+        f'<span class="fc-icon">{type_icons.get(ctype, "•")}</span>'
+        f'<span class="fc-type">{ctype.upper()}</span>'
+        f'<span class="fc-path">{escape(fpath)}</span></div>'
+        for ctype, fpath in changes[:limit])
+    extra = f'<div class="fc-more">+ {len(changes) - limit} more…</div>' if len(changes) > limit else ""
+    return f'<div class="file-changes">{rows}{extra}</div>'
 
 
 def html_status(s):
     if s.state == "verified":
-        meta = f"Last check {utc()} UTC"
+        meta = f"Last check {local_time()} Local"
         if s.window_open:
             meta += " · update window open, waiting for the release"
         return _banner("s-verified", styles.ICON_VERIFIED, "Verified",
-                       "All monitored files match the on-chain cryptographic reference.", meta)
+                       "All files in the monitored directory match the on-chain cryptographic reference.", meta)
 
     if s.state == "authorized":
         e = s.event
         return _banner("s-authorized", styles.ICON_AUTHORIZED, "Authorized update",
                        "Developer approval found on-chain. New fingerprint anchored; approval consumed.",
-                       f"Anchored in block {e.block} at {utc(e.timestamp)} UTC by Agent-01",
-                       html_changes(s.changes))
+                       f"Anchored in block {e.block} at {local_time(e.timestamp)} Local by Agent-01",
+                       html_file_changes(s.changes))
 
     e = s.event
-    meta = (f"Tamper alert written on-chain in block {e.block} at {utc(e.timestamp)} UTC"
+    meta = (f"Tamper alert written on-chain in block {e.block} at {local_time(e.timestamp)} Local"
             if e else "Writing tamper alert on-chain…")
-    msg = ("config.json was deleted. No update was authorized."
-           if s.live == MISSING else
-           "config.json no longer matches the on-chain reference, and no update was authorized.")
+    n_files = len(s.changes)
+    msg = (f"{n_files} file{'s' if n_files != 1 else ''} changed in target_system/ without authorization."
+           if n_files > 0 else
+           "target_system/ no longer matches the on-chain reference, and no update was authorized.")
     return _banner("s-tamper", styles.ICON_TAMPER, "Unauthorized modification", msg, meta,
-                   html_changes(s.changes))
+                   html_file_changes(s.changes))
 
 
 def html_problem(problem):
@@ -197,13 +244,32 @@ def _grouped(h, cls=""):
 
 def html_hashes(s):
     bad = "bad" if s.state == "tamper" else ""
-    path = "./" + str(target.CONFIG_PATH.relative_to(target.ROOT))
-    return (f'<div class="card"><div class="card-head"><span>Hash comparison</span>'
+    path = "./target_system/"
+    return (f'<div class="card"><div class="card-head"><span>Directory hash comparison</span>'
             f'<span class="mono">{path}</span></div>'
-            f'<div class="hash-row"><div class="hash-label">Live file {short(s.live)}...</div>'
+            f'<div class="hash-row"><div class="hash-label">Live directory {short(s.live)}...</div>'
             f'<div class="hash">{_grouped(s.live, bad)}</div></div>'
             f'<div class="hash-row"><div class="hash-label">On-chain trusted {short(s.trusted)}...</div>'
             f'<div class="hash">{_grouped(s.trusted)}</div></div></div>')
+
+
+def html_file_list():
+    """Show the current contents of the monitored directory."""
+    if not TARGET_DIR.is_dir():
+        return ""
+    files = sorted(f for f in TARGET_DIR.rglob("*") if f.is_file())
+    if not files:
+        return ""
+    rows = "".join(
+        f'<div class="fl-row"><span class="fl-name">{escape(f.relative_to(TARGET_DIR).as_posix())}</span>'
+        f'<span class="fl-size">{f.stat().st_size:,} bytes</span></div>'
+        for f in files[:20])
+    count = len(files)
+    extra = f'<div class="fl-more">+ {count - 20} more…</div>' if count > 20 else ""
+    return (f'<div class="card"><div class="card-head"><span>📂 Monitored directory</span>'
+            f'<span class="mono">{count} file{"s" if count != 1 else ""}</span></div>'
+            f'<div class="fl-hint">Edit, add, or delete any file below to see tampering detected in real-time.</div>'
+            f'{rows}{extra}</div>')
 
 
 _KIND = {"anchored": ("Anchored", "st-anchored"),
@@ -212,7 +278,6 @@ _KIND = {"anchored": ("Anchored", "st-anchored"),
 
 
 def html_trail(s, ledger, max_blocks=4, max_rows=8):
-    # Chain strip: the most recent blocks that carry integrity events (+ the deploy block).
     per_block = {ledger.deploy_block: ("Deploy", "")}
     for e in s.trail:
         label = {"anchored": short(e.hash), "authorized": "Approval", "tamper": "⚠ " + short(e.hash)}[e.kind]
@@ -223,7 +288,7 @@ def html_trail(s, ledger, max_blocks=4, max_rows=8):
         for n, (label, kind) in recent)
 
     rows = "".join(
-        f'<tr><td class="mono">{utc(e.timestamp)}</td>'
+        f'<tr><td class="mono">{local_time(e.timestamp)}</td>'
         f'<td class="mono">{short(e.hash) if e.hash else "—"}</td>'
         f'<td class="{_KIND[e.kind][1]}">{_KIND[e.kind][0]}</td>'
         f'<td>{ledger.label(e.by)}</td></tr>'
@@ -232,65 +297,140 @@ def html_trail(s, ledger, max_blocks=4, max_rows=8):
     addr = f"{ledger.address[:10]}...{ledger.address[-4:]}"
     return (f'<div class="card"><div class="card-head"><span>Blockchain audit trail</span>'
             f'<span class="mono">{addr}</span></div><div class="blocks">{cards}</div>'
-            '<div class="table-wrap"><table class="trail"><thead><tr><th>Time (UTC)</th><th>Hash</th>'
+            '<div class="table-wrap"><table class="trail"><thead><tr><th>Time (Local)</th><th>Hash</th>'
             f'<th>Status</th><th>By</th></tr></thead><tbody>{rows}</tbody></table></div></div>')
+
+
+# ------------------------------------------------------------------ upload page
+def show_upload_page():
+    """The initial upload screen — user uploads files into target_system/ before monitoring."""
+    st.html('''
+    <div class="upload-page">
+        <div class="upload-hero">
+            <div class="upload-icon">🛡️</div>
+            <div class="upload-title">Runtime Integrity Engine</div>
+            <div class="upload-subtitle">Upload files to the monitored directory and anchor the folder hash on-chain</div>
+        </div>
+    </div>
+    ''')
+
+    # Show existing files in target_system/
+    existing = sorted(f for f in TARGET_DIR.rglob("*") if f.is_file()) if TARGET_DIR.is_dir() else []
+    if existing:
+        st.html(f'''
+        <div class="upload-existing">
+            <div class="upload-preview-title">Files already in target_system/ ({len(existing)})</div>
+        </div>
+        ''')
+        for f in existing[:15]:
+            rel = f.relative_to(TARGET_DIR).as_posix()
+            size = f.stat().st_size
+            st.html(f'<div class="upload-detail"><span class="mono">{escape(rel)}</span> — <span class="upload-label">{size:,} bytes</span></div>')
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        uploaded_files = st.file_uploader(
+            "Add files to target_system/ (optional)",
+            type=None,
+            key="file_upload",
+            accept_multiple_files=True,
+            help="Upload additional files to protect. They'll be saved into target_system/. You can also skip this and anchor the existing files."
+        )
+
+        if uploaded_files:
+            st.html(f'<div class="upload-preview"><div class="upload-preview-title">{len(uploaded_files)} file(s) ready to add</div></div>')
+            for uf in uploaded_files:
+                file_bytes = uf.read()
+                uf.seek(0)  # reset for later use
+                st.html(f'<div class="upload-detail"><span class="mono">{escape(uf.name)}</span> — <span class="upload-label">{len(file_bytes):,} bytes</span></div>')
+
+        st.html('<div style="height: 0.5rem"></div>')
+
+        if st.button("🔗 Anchor directory on blockchain", key="btn_anchor", use_container_width=True, type="primary"):
+            _anchor_directory(uploaded_files or [])
+
+
+def _anchor_directory(uploaded_files):
+    """Save any new uploads to target_system/, then anchor the whole directory hash on-chain."""
+    ledger, problem = get_ledger()
+    if ledger is None:
+        st.error(f"Cannot anchor: blockchain is {'offline' if problem == 'offline' else 'not deployed'}.")
+        return
+
+    # Save uploaded files to target_system/
+    TARGET_DIR.mkdir(exist_ok=True)
+    for uf in uploaded_files:
+        dest = TARGET_DIR / uf.name
+        dest.write_bytes(uf.read())
+
+    # Compute directory hash
+    dir_hash = sha256_directory(TARGET_DIR)
+    if not dir_hash:
+        st.error("target_system/ is empty. Upload at least one file.")
+        return
+
+    # Anchor on-chain
+    try:
+        ledger.authorize_update()
+        ledger.update_hash(dir_hash)
+    except Exception as e:
+        st.error(f"On-chain anchoring failed: {e}")
+        return
+
+    # Save the trusted manifest
+    save_manifest()
+
+    # Mark as anchored
+    st.session_state["dir_anchored"] = True
+    st.toast("✅ Directory anchored on-chain!", icon="🔗")
+    st.rerun()
 
 
 # ------------------------------------------------------------------ sidebar: demo panel
 ledger, problem = get_ledger()
+dir_is_anchored = st.session_state.get("dir_anchored", False)
 
-with st.sidebar:
-    st.html('<div class="side-title">Demo panel</div><div class="side-sub">Try the attack live</div>')
-    hack = st.button("Simulate hack", icon=":material/skull:", key="btn_hack", width="stretch")
-    approve = st.button("Approve update", icon=":material/signature:", key="btn_approve", width="stretch")
-    reset = st.button("Reset", icon=":material/refresh:", key="btn_reset", width="stretch")
+if dir_is_anchored:
+    with st.sidebar:
+        st.html('<div class="side-title">Demo panel</div><div class="side-sub">Monitoring: target_system/</div>')
 
-if hack:
-    target.apply_hack()
-    st.toast("Attacker rewrote config.json", icon=":material/skull:")
+        upload_new = st.button("Re-anchor directory", icon=":material/upload_file:", key="btn_upload_new", width="stretch")
 
-if approve:
-    if ledger is None:
-        st.toast("Blockchain offline", icon=":material/cloud_off:")
-    elif live_hash() != ledger.trusted_hash() and not ledger.update_authorized():
-        # Approval must come BEFORE the change: signing off on an already-tampered file
-        # would launder the attack into the trusted state.
-        st.toast("Blocked: the file is already tampered. Reset first — approvals can't be applied retroactively.",
-                 icon=":material/block:")
-    else:
-        ledger.authorize_update()     # developer key opens a one-shot window on-chain
-        target.apply_dev_update()     # ...then the release lands on disk
-        st.toast("Developer approved on-chain, release v" + target.read_config()["version"] + " applied",
-                 icon=":material/signature:")
+    if upload_new:
+        st.session_state["dir_anchored"] = False
+        st.rerun()
 
-if reset:
-    target.restore_trusted()
-    st.toast("config.json restored from the last trusted snapshot", icon=":material/refresh:")
-
-with st.sidebar:
-    chain = f"Hardhat, chain {ledger.chain_id}" if ledger else "Hardhat, offline"
-    st.html(f'<div class="side-info">Agent-01 (Production)<br>{target.CONFIG_PATH.name}<br>{chain}</div>')
+    with st.sidebar:
+        st.divider()
+        chain = f"Hardhat, chain {ledger.chain_id}" if ledger else "Hardhat, offline"
+        file_count = len(list(TARGET_DIR.rglob("*"))) if TARGET_DIR.is_dir() else 0
+        st.html(f'<div class="side-info">Agent-01 (Production)<br>target_system/ ({file_count} files)<br>{chain}</div>')
 
 
-# ------------------------------------------------------------- main: live dashboard
-@st.fragment(run_every=POLL_SECONDS)
-def dashboard():
-    ledger, problem = get_ledger()
-    status = None
-    if ledger:
-        try:
-            status = run_agent(ledger)
-        except Exception:
-            _cached_ledger.clear()  # node restarted or contract gone: reconnect next tick
-            problem = "offline"
+# ------------------------------------------------------------- main: page routing
+if not dir_is_anchored:
+    show_upload_page()
+else:
+    @st.fragment(run_every=POLL_SECONDS)
+    def dashboard():
+        ledger, problem = get_ledger()
+        status = None
+        if ledger:
+            try:
+                status = run_agent(ledger)
+            except Exception:
+                _cached_ledger.clear()
+                problem = "offline"
 
-    st.html(html_header(online=status is not None))
-    if status is None:
-        st.html(html_problem(problem))
-        return
-    st.html(html_status(status))
-    st.html(html_hashes(status))
-    st.html(html_trail(status, ledger))
+        st.html(html_header(online=status is not None))
+        if status is None:
+            st.html(html_problem(problem))
+            return
+        st.html(html_status(status))
+        file_list = html_file_list()
+        if file_list:
+            st.html(file_list)
+        st.html(html_hashes(status))
+        st.html(html_trail(status, ledger))
 
-
-dashboard()
+    dashboard()

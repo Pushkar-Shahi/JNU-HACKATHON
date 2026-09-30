@@ -105,6 +105,60 @@ table.trail { width: 100%; border-collapse: collapse; font-size: .98rem; }
 .trail .mono { font-size: .95rem; }
 .trail .st-anchored { color: var(--green); } .trail .st-authorized { color: var(--blue); } .trail .st-tamper { color: var(--red); font-weight: 500; }
 
+/* ---- upload page */
+.upload-page { text-align: center; padding: 2rem 0 1rem; }
+.upload-hero { margin-bottom: 1.5rem; }
+.upload-icon { font-size: 4rem; margin-bottom: .5rem; filter: drop-shadow(0 0 24px rgba(74,222,128,.35)); animation: float 3s ease-in-out infinite; }
+@keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+.upload-title { font-size: 2.2rem; font-weight: 700; color: var(--text); letter-spacing: -.02em; }
+.upload-subtitle { color: var(--muted); font-size: 1.1rem; margin-top: .4rem; }
+
+.upload-preview { background: var(--panel); border: 1px solid var(--green-line); border-radius: 14px;
+  padding: 1.2rem 1.5rem; margin: 1rem 0; text-align: left; }
+.upload-preview-title { font-size: 1.1rem; font-weight: 600; color: var(--green); margin-bottom: .6rem; }
+.upload-detail { color: var(--text); font-size: 1rem; line-height: 1.8; }
+.upload-label { color: var(--muted); }
+
+/* ---- monitored file info strip */
+.monitored-info { margin-bottom: 0; }
+.monitored-hint { color: var(--muted); font-size: .95rem; margin-top: -.4rem; }
+
+/* ---- upload new button in sidebar */
+.st-key-btn_upload_new button { border: 1px solid var(--line); color: var(--muted); min-height: 48px; border-radius: 10px; background: transparent; }
+.st-key-btn_upload_new button:hover { border-color: #3a424d; background: rgba(255,255,255,.03); color: var(--text); }
+
+/* ---- streamlit file uploader override */
+[data-testid="stFileUploader"] { margin: 1rem 0; }
+[data-testid="stFileUploader"] section { border: 2px dashed var(--line); border-radius: 14px; background: var(--panel); padding: 2rem; transition: border-color .2s; }
+[data-testid="stFileUploader"] section:hover { border-color: var(--green-line); }
+[data-testid="stFileUploader"] button { border-radius: 8px; }
+
+/* ---- anchor button */
+.st-key-btn_anchor button { background: linear-gradient(135deg, #22c55e, #16a34a) !important;
+  border: none !important; color: #fff !important; font-weight: 600 !important; font-size: 1.05rem !important;
+  padding: .85rem 1.5rem !important; border-radius: 12px !important;
+  box-shadow: 0 4px 20px rgba(34,197,94,.35) !important; transition: transform .1s, box-shadow .15s !important; }
+.st-key-btn_anchor button:hover { transform: translateY(-1px) !important; box-shadow: 0 6px 28px rgba(34,197,94,.45) !important; }
+.st-key-btn_anchor button:active { transform: scale(.98) !important; }
+
+/* ---- file list (monitored directory) */
+.fl-hint { color: var(--muted); font-size: .95rem; margin-bottom: 1rem; }
+.fl-row { display: flex; justify-content: space-between; padding: .45rem 0; border-bottom: 1px solid rgba(255,255,255,.04); }
+.fl-row:last-child { border-bottom: none; }
+.fl-name { font-family: var(--mono); color: var(--text); font-size: .95rem; overflow-wrap: anywhere; }
+.fl-size { color: var(--muted); font-size: .9rem; font-family: var(--mono); white-space: nowrap; margin-left: 1rem; }
+.fl-more { color: var(--muted); font-size: .9rem; margin-top: .5rem; text-align: center; font-style: italic; }
+
+/* ---- file-level changes (tamper alert details) */
+.file-changes { margin-top: .8rem; display: grid; gap: .4rem; }
+.file-change { display: flex; align-items: baseline; gap: .6rem; padding: .4rem .6rem; background: rgba(0,0,0,.15); border-radius: 6px; font-family: var(--mono); font-size: .9rem; }
+.fc-type { font-weight: 600; font-size: .75rem; letter-spacing: .05em; padding: .15rem .4rem; border-radius: 4px; }
+.fc-modified .fc-type { background: rgba(251,191,36,.15); color: #fbbf24; }
+.fc-added .fc-type { background: rgba(74,222,128,.15); color: #4ade80; }
+.fc-deleted .fc-type { background: rgba(255,95,95,.15); color: #ff5f5f; }
+.fc-path { color: var(--text); overflow-wrap: anywhere; }
+.fc-more { color: var(--muted); font-size: .85rem; padding: .2rem .6rem; }
+
 @media (max-width: 640px) {
   [data-testid="stMainBlockContainer"] { padding: 1.25rem 1rem 2rem; }
   .topbar { flex-direction: column; gap: .25rem; }
@@ -113,6 +167,7 @@ table.trail { width: 100%; border-collapse: collapse; font-size: .98rem; }
   .blocks { flex-wrap: wrap; }
   .blk { flex-basis: calc(50% - .3rem); }
   .chain-link { display: none; }
+  .upload-title { font-size: 1.6rem; }
 }
 </style>
 """
